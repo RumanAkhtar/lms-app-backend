@@ -16,7 +16,7 @@ const {
 } = process.env;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("❌ Missing Supabase credentials in environment variables");
+  console.error("❌ Missing Supabase credentials");
   process.exit(1);
 }
 
@@ -28,7 +28,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: "*", // Later restrict to your domain if needed
+    origin: "*", // Restrict in production
     methods: ["GET", "POST", "PUT", "DELETE"],
   })
 );
@@ -36,7 +36,7 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 
 /* ===================================================== */
-/* SUPABASE CLIENT (ADMIN - SERVICE ROLE)               */
+/* SUPABASE ADMIN CLIENT                                */
 /* ===================================================== */
 
 const supabase = createClient(
@@ -51,11 +51,50 @@ const supabase = createClient(
 );
 
 /* ===================================================== */
-/* GLOBAL ERROR HANDLER WRAPPER                         */
+/* ASYNC WRAPPER                                         */
 /* ===================================================== */
 
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
+
+/* ===================================================== */
+/* AUTH MIDDLEWARE                                       */
+/* ===================================================== */
+
+const verifyToken = asyncHandler(async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).json({ error: "Missing Authorization header" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  const { data, error } = await supabase.auth.getUser(token);
+
+  if (error || !data?.user) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  req.user = data.user;
+  next();
+});
+
+const requireAdmin = asyncHandler(async (req, res, next) => {
+  const userId = req.user.id;
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", userId)
+    .single();
+
+  if (error || data?.role !== "admin") {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+
+  next();
+});
 
 /* ===================================================== */
 /* HEALTH CHECK                                          */
@@ -69,17 +108,19 @@ app.get("/api/health", (req, res) => {
 });
 
 /* ===================================================== */
-/* USERS                                                 */
+/* USERS (ADMIN ONLY)                                    */
 /* ===================================================== */
 
 app.get(
   "/api/users",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { role } = req.query;
 
     let query = supabase
       .from("profiles")
-      .select("*")
+      .select("id, name, role, avatar, created_at")
       .order("name", { ascending: true });
 
     if (role) query = query.eq("role", role);
@@ -91,29 +132,41 @@ app.get(
   })
 );
 
-/* CREATE INSTRUCTOR */
+/* ===================================================== */
+/* INSTRUCTORS                                           */
+/* ===================================================== */
+
+app.get(
+  "/api/instructors",
+  verifyToken,
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, name, avatar, created_at")
+      .eq("role", "instructor")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.status(200).json(data);
+  })
+);
 
 app.post(
   "/api/instructors",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { name, email } = req.body;
 
     if (!name || !email) {
-      return res.status(400).json({ error: "Name and email are required" });
+      return res.status(400).json({
+        error: "Name and email are required",
+      });
     }
 
     const normalizedEmail = email.toLowerCase().trim();
-
-    // Check existing
-    const { data: existing } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("email", normalizedEmail)
-      .maybeSingle();
-
-    if (existing) {
-      return res.status(409).json({ error: "User already exists" });
-    }
 
     // Create auth user
     const { data: userData, error: authError } =
@@ -126,13 +179,11 @@ app.post(
 
     const userId = userData.user.id;
 
-    // Create profile
     const { error: profileError } = await supabase
       .from("profiles")
       .insert({
         id: userId,
         name,
-        email: normalizedEmail,
         role: "instructor",
       });
 
@@ -150,11 +201,13 @@ app.post(
 );
 
 /* ===================================================== */
-/* COURSES                                               */
+/* COURSES (ADMIN ONLY)                                  */
 /* ===================================================== */
 
 app.get(
   "/api/courses",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from("courses")
@@ -165,10 +218,7 @@ app.get(
         thumbnail_url,
         category,
         level,
-        language,
         status,
-        is_paid,
-        price,
         created_at,
         profiles:instructor_id ( id, name )
       `)
@@ -182,6 +232,8 @@ app.get(
 
 app.get(
   "/api/courses/:id",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
@@ -204,13 +256,15 @@ app.get(
 
 app.post(
   "/api/courses",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { title, short_desc, instructor_id, ...rest } = req.body;
 
     if (!title || !short_desc || !instructor_id) {
-      return res
-        .status(400)
-        .json({ error: "title, short_desc, instructor_id required" });
+      return res.status(400).json({
+        error: "title, short_desc, instructor_id required",
+      });
     }
 
     const { data, error } = await supabase
@@ -233,6 +287,8 @@ app.post(
 
 app.put(
   "/api/courses/:id",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
@@ -251,6 +307,8 @@ app.put(
 
 app.delete(
   "/api/courses/:id",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
@@ -274,6 +332,8 @@ app.delete(
 
 app.get(
   "/api/courses/:id/curriculum",
+  verifyToken,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
