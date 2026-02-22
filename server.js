@@ -32,7 +32,7 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 
 /* ===================================================== */
-/* SUPABASE CLIENT (SERVICE ROLE)                        */
+/* SUPABASE SERVICE ROLE CLIENT                          */
 /* ===================================================== */
 
 const supabase = createClient(
@@ -47,7 +47,7 @@ const supabase = createClient(
 );
 
 /* ===================================================== */
-/* ASYNC WRAPPER                                         */
+/* ASYNC HANDLER                                         */
 /* ===================================================== */
 
 const asyncHandler = (fn) => (req, res, next) =>
@@ -87,13 +87,13 @@ const verifyToken = asyncHandler(async (req, res, next) => {
 /* ===================================================== */
 
 const requireAdmin = asyncHandler(async (req, res, next) => {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from("profiles")
     .select("role")
     .eq("id", req.user.id)
     .single();
 
-  if (error || !data || data.role !== "admin") {
+  if (!data || data.role !== "admin") {
     return res.status(403).json({
       error: "Forbidden",
       message: "Admin access required",
@@ -105,20 +105,13 @@ const requireAdmin = asyncHandler(async (req, res, next) => {
 });
 
 const requireAdminOrInstructor = asyncHandler(async (req, res, next) => {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from("profiles")
     .select("role")
     .eq("id", req.user.id)
     .single();
 
-  if (error || !data) {
-    return res.status(403).json({
-      error: "Forbidden",
-      message: "Access denied",
-    });
-  }
-
-  if (data.role !== "admin" && data.role !== "instructor") {
+  if (!data || !["admin", "instructor"].includes(data.role)) {
     return res.status(403).json({
       error: "Forbidden",
       message: "Admin or Instructor access required",
@@ -154,14 +147,14 @@ app.get(
     let query = supabase
       .from("profiles")
       .select("id, name, role, avatar, created_at")
-      .order("name", { ascending: true });
+      .order("created_at", { ascending: false });
 
     if (role) query = query.eq("role", role);
 
     const { data, error } = await query;
     if (error) throw error;
 
-    res.status(200).json(data);
+    res.json(data);
   })
 );
 
@@ -182,7 +175,7 @@ app.get(
 
     if (error) throw error;
 
-    res.status(200).json(data);
+    res.json(data);
   })
 );
 
@@ -212,7 +205,38 @@ app.get(
 
     if (error) throw error;
 
-    res.status(200).json(data);
+    res.json(data);
+  })
+);
+
+/* ===================================================== */
+/* COURSE DETAILS (ADMIN ONLY)                           */
+/* ===================================================== */
+
+app.get(
+  "/api/courses/:id",
+  verifyToken,
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from("courses")
+      .select(`
+        *,
+        profiles:instructor_id ( id, name )
+      `)
+      .eq("id", id)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({
+        error: "Not Found",
+        message: "Course not found",
+      });
+    }
+
+    res.json(data);
   })
 );
 
@@ -245,7 +269,7 @@ app.get(
     const { data, error } = await query;
     if (error) throw error;
 
-    res.status(200).json(data);
+    res.json(data);
   })
 );
 
@@ -281,9 +305,20 @@ app.get(
       author: a.profiles?.name || "Admin",
     }));
 
-    res.status(200).json(formatted);
+    res.json(formatted);
   })
 );
+
+/* ===================================================== */
+/* 404 HANDLER                                           */
+/* ===================================================== */
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Not Found",
+    message: "API route not found",
+  });
+});
 
 /* ===================================================== */
 /* GLOBAL ERROR HANDLER                                  */
