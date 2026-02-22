@@ -82,13 +82,15 @@ const verifyToken = asyncHandler(async (req, res, next) => {
   next();
 });
 
-const requireAdmin = asyncHandler(async (req, res, next) => {
-  const userId = req.user.id;
+/* ===================================================== */
+/* ROLE MIDDLEWARE                                       */
+/* ===================================================== */
 
+const requireAdmin = asyncHandler(async (req, res, next) => {
   const { data, error } = await supabase
     .from("profiles")
     .select("role")
-    .eq("id", userId)
+    .eq("id", req.user.id)
     .single();
 
   if (error || !data || data.role !== "admin") {
@@ -98,6 +100,32 @@ const requireAdmin = asyncHandler(async (req, res, next) => {
     });
   }
 
+  req.userRole = data.role;
+  next();
+});
+
+const requireAdminOrInstructor = asyncHandler(async (req, res, next) => {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", req.user.id)
+    .single();
+
+  if (error || !data) {
+    return res.status(403).json({
+      error: "Forbidden",
+      message: "Access denied",
+    });
+  }
+
+  if (data.role !== "admin" && data.role !== "instructor") {
+    return res.status(403).json({
+      error: "Forbidden",
+      message: "Admin or Instructor access required",
+    });
+  }
+
+  req.userRole = data.role;
   next();
 });
 
@@ -174,7 +202,6 @@ app.post(
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Create auth user
     const { data: userData, error: authError } =
       await supabase.auth.admin.createUser({
         email: normalizedEmail,
@@ -185,7 +212,6 @@ app.post(
 
     const userId = userData.user.id;
 
-    // Create profile
     const { error: profileError } = await supabase
       .from("profiles")
       .insert({
@@ -238,55 +264,72 @@ app.get(
   })
 );
 
+/* ===================================================== */
+/* LIVE SESSIONS (ADMIN + INSTRUCTOR)                    */
+/* ===================================================== */
+
 app.get(
-  "/api/courses/:id",
+  "/api/live-sessions",
   verifyToken,
-  requireAdmin,
+  requireAdminOrInstructor,
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
+    let query = supabase
+      .from("live_sessions")
+      .select(`
+        id,
+        title,
+        course,
+        start_time,
+        status,
+        instructor_id,
+        profiles:instructor_id ( id, name )
+      `)
+      .order("start_time", { ascending: false });
 
-    const { data, error } = await supabase
-      .from("courses")
-      .select(`*, profiles:instructor_id ( id, name )`)
-      .eq("id", id)
-      .single();
-
-    if (error) {
-      if (error.code === "PGRST116") {
-        return res.status(404).json({
-          error: "Not Found",
-          message: "Course not found",
-        });
-      }
-      throw error;
+    if (req.userRole === "instructor") {
+      query = query.eq("instructor_id", req.user.id);
     }
+
+    const { data, error } = await query;
+    if (error) throw error;
 
     res.status(200).json(data);
   })
 );
 
 app.post(
-  "/api/courses",
+  "/api/live-sessions",
   verifyToken,
-  requireAdmin,
+  requireAdminOrInstructor,
   asyncHandler(async (req, res) => {
-    const { title, short_desc, instructor_id, ...rest } = req.body;
+    const { title, course, start_time, status, instructor_id } = req.body;
 
-    if (!title || !short_desc || !instructor_id) {
+    if (!title || !course || !start_time) {
       return res.status(400).json({
         error: "Validation Error",
-        message: "title, short_desc, instructor_id required",
+        message: "title, course, start_time required",
+      });
+    }
+
+    const finalInstructorId =
+      req.userRole === "instructor"
+        ? req.user.id
+        : instructor_id;
+
+    if (!finalInstructorId) {
+      return res.status(400).json({
+        error: "Instructor required",
       });
     }
 
     const { data, error } = await supabase
-      .from("courses")
+      .from("live_sessions")
       .insert({
         title,
-        short_desc,
-        instructor_id,
-        status: rest.status || "draft",
-        ...rest,
+        course,
+        start_time,
+        status: status || "upcoming",
+        instructor_id: finalInstructorId,
       })
       .select()
       .single();
@@ -298,14 +341,29 @@ app.post(
 );
 
 app.put(
-  "/api/courses/:id",
+  "/api/live-sessions/:id",
   verifyToken,
-  requireAdmin,
+  requireAdminOrInstructor,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
+    if (req.userRole === "instructor") {
+      const { data } = await supabase
+        .from("live_sessions")
+        .select("instructor_id")
+        .eq("id", id)
+        .single();
+
+      if (!data || data.instructor_id !== req.user.id) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "You can only edit your own sessions",
+        });
+      }
+    }
+
     const { data, error } = await supabase
-      .from("courses")
+      .from("live_sessions")
       .update(req.body)
       .eq("id", id)
       .select()
@@ -318,14 +376,29 @@ app.put(
 );
 
 app.delete(
-  "/api/courses/:id",
+  "/api/live-sessions/:id",
   verifyToken,
-  requireAdmin,
+  requireAdminOrInstructor,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
+    if (req.userRole === "instructor") {
+      const { data } = await supabase
+        .from("live_sessions")
+        .select("instructor_id")
+        .eq("id", id)
+        .single();
+
+      if (!data || data.instructor_id !== req.user.id) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "You can only delete your own sessions",
+        });
+      }
+    }
+
     const { error } = await supabase
-      .from("courses")
+      .from("live_sessions")
       .delete()
       .eq("id", id);
 
@@ -333,48 +406,8 @@ app.delete(
 
     res.status(200).json({
       success: true,
-      message: "Course deleted successfully",
+      message: "Live session deleted successfully",
     });
-  })
-);
-
-/* ===================================================== */
-/* CURRICULUM (ADMIN ONLY)                               */
-/* ===================================================== */
-
-app.get(
-  "/api/courses/:id/curriculum",
-  verifyToken,
-  requireAdmin,
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    const { data, error } = await supabase
-      .from("course_modules")
-      .select(`
-        id,
-        title,
-        order_index,
-        lessons:course_lessons (
-          id,
-          title,
-          type,
-          url,
-          order_index,
-          files:lesson_files (
-            id,
-            name,
-            file_url,
-            file_size
-          )
-        )
-      `)
-      .eq("course_id", id)
-      .order("order_index", { ascending: true });
-
-    if (error) throw error;
-
-    res.status(200).json(data);
   })
 );
 
