@@ -186,54 +186,6 @@ app.get(
   })
 );
 
-app.post(
-  "/api/instructors",
-  verifyToken,
-  requireAdmin,
-  asyncHandler(async (req, res) => {
-    const { name, email } = req.body;
-
-    if (!name || !email) {
-      return res.status(400).json({
-        error: "Validation Error",
-        message: "Name and email are required",
-      });
-    }
-
-    const normalizedEmail = email.toLowerCase().trim();
-
-    const { data: userData, error: authError } =
-      await supabase.auth.admin.createUser({
-        email: normalizedEmail,
-        email_confirm: true,
-      });
-
-    if (authError) throw authError;
-
-    const userId = userData.user.id;
-
-    const { error: profileError } = await supabase
-      .from("profiles")
-      .insert({
-        id: userId,
-        name,
-        email: normalizedEmail,
-        role: "instructor",
-      });
-
-    if (profileError) {
-      await supabase.auth.admin.deleteUser(userId);
-      throw profileError;
-    }
-
-    res.status(201).json({
-      success: true,
-      message: "Instructor created successfully",
-      userId,
-    });
-  })
-);
-
 /* ===================================================== */
 /* COURSES (ADMIN ONLY)                                  */
 /* ===================================================== */
@@ -297,39 +249,63 @@ app.get(
   })
 );
 
-app.post(
-  "/api/live-sessions",
-  verifyToken,
-  requireAdminOrInstructor,
-  asyncHandler(async (req, res) => {
-    const { title, course, start_time, status, instructor_id } = req.body;
+/* ===================================================== */
+/* ANNOUNCEMENTS (ADMIN ONLY)                            */
+/* ===================================================== */
 
-    if (!title || !course || !start_time) {
+app.get(
+  "/api/announcements",
+  verifyToken,
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase
+      .from("announcements")
+      .select(`
+        id,
+        title,
+        content,
+        priority,
+        created_at,
+        profiles:author_id ( name )
+      `)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    const formatted = data.map((a) => ({
+      id: a.id,
+      title: a.title,
+      content: a.content,
+      priority: a.priority,
+      created_at: a.created_at,
+      author: a.profiles?.name || "Admin",
+    }));
+
+    res.status(200).json(formatted);
+  })
+);
+
+app.post(
+  "/api/announcements",
+  verifyToken,
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { title, content, priority } = req.body;
+
+    if (!title || !content) {
       return res.status(400).json({
         error: "Validation Error",
-        message: "title, course, start_time required",
-      });
-    }
-
-    const finalInstructorId =
-      req.userRole === "instructor"
-        ? req.user.id
-        : instructor_id;
-
-    if (!finalInstructorId) {
-      return res.status(400).json({
-        error: "Instructor required",
+        message: "Title and content are required",
       });
     }
 
     const { data, error } = await supabase
-      .from("live_sessions")
+      .from("announcements")
       .insert({
         title,
-        course,
-        start_time,
-        status: status || "upcoming",
-        instructor_id: finalInstructorId,
+        content,
+        priority: priority || "low",
+        author_id: req.user.id,
       })
       .select()
       .single();
@@ -340,65 +316,15 @@ app.post(
   })
 );
 
-app.put(
-  "/api/live-sessions/:id",
-  verifyToken,
-  requireAdminOrInstructor,
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    if (req.userRole === "instructor") {
-      const { data } = await supabase
-        .from("live_sessions")
-        .select("instructor_id")
-        .eq("id", id)
-        .single();
-
-      if (!data || data.instructor_id !== req.user.id) {
-        return res.status(403).json({
-          error: "Forbidden",
-          message: "You can only edit your own sessions",
-        });
-      }
-    }
-
-    const { data, error } = await supabase
-      .from("live_sessions")
-      .update(req.body)
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.status(200).json(data);
-  })
-);
-
 app.delete(
-  "/api/live-sessions/:id",
+  "/api/announcements/:id",
   verifyToken,
-  requireAdminOrInstructor,
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-
-    if (req.userRole === "instructor") {
-      const { data } = await supabase
-        .from("live_sessions")
-        .select("instructor_id")
-        .eq("id", id)
-        .single();
-
-      if (!data || data.instructor_id !== req.user.id) {
-        return res.status(403).json({
-          error: "Forbidden",
-          message: "You can only delete your own sessions",
-        });
-      }
-    }
 
     const { error } = await supabase
-      .from("live_sessions")
+      .from("announcements")
       .delete()
       .eq("id", id);
 
@@ -406,7 +332,7 @@ app.delete(
 
     res.status(200).json({
       success: true,
-      message: "Live session deleted successfully",
+      message: "Announcement deleted successfully",
     });
   })
 );
