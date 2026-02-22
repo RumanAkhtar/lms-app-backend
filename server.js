@@ -4,31 +4,27 @@ import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 
 /* ===================================================== */
-/* LOAD ENV                                              */
+/* LOAD ENVIRONMENT                                      */
 /* ===================================================== */
 
 dotenv.config();
 
-const {
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  PORT,
-} = process.env;
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PORT } = process.env;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("❌ Missing Supabase credentials");
+  console.error("❌ Missing Supabase environment variables");
   process.exit(1);
 }
 
 /* ===================================================== */
-/* EXPRESS SETUP                                         */
+/* INITIALIZE APP                                        */
 /* ===================================================== */
 
 const app = express();
 
 app.use(
   cors({
-    origin: "*", // Restrict in production
+    origin: "*", // ⚠️ Restrict in production
     methods: ["GET", "POST", "PUT", "DELETE"],
   })
 );
@@ -36,7 +32,7 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 
 /* ===================================================== */
-/* SUPABASE ADMIN CLIENT                                */
+/* SUPABASE ADMIN CLIENT                                 */
 /* ===================================================== */
 
 const supabase = createClient(
@@ -64,8 +60,11 @@ const asyncHandler = (fn) => (req, res, next) =>
 const verifyToken = asyncHandler(async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
-  if (!authHeader) {
-    return res.status(401).json({ error: "Missing Authorization header" });
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Missing or invalid Authorization header",
+    });
   }
 
   const token = authHeader.split(" ")[1];
@@ -73,7 +72,10 @@ const verifyToken = asyncHandler(async (req, res, next) => {
   const { data, error } = await supabase.auth.getUser(token);
 
   if (error || !data?.user) {
-    return res.status(401).json({ error: "Invalid or expired token" });
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Invalid or expired token",
+    });
   }
 
   req.user = data.user;
@@ -89,8 +91,11 @@ const requireAdmin = asyncHandler(async (req, res, next) => {
     .eq("id", userId)
     .single();
 
-  if (error || data?.role !== "admin") {
-    return res.status(403).json({ error: "Admin access required" });
+  if (error || !data || data.role !== "admin") {
+    return res.status(403).json({
+      error: "Forbidden",
+      message: "Admin access required",
+    });
   }
 
   next();
@@ -120,7 +125,7 @@ app.get(
 
     let query = supabase
       .from("profiles")
-      .select("id, name, role, avatar, created_at")
+      .select("id, name, email, role, avatar, created_at")
       .order("name", { ascending: true });
 
     if (role) query = query.eq("role", role);
@@ -133,7 +138,7 @@ app.get(
 );
 
 /* ===================================================== */
-/* INSTRUCTORS                                           */
+/* INSTRUCTORS (ADMIN ONLY)                              */
 /* ===================================================== */
 
 app.get(
@@ -143,7 +148,7 @@ app.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from("profiles")
-      .select("id, name, avatar, created_at")
+      .select("id, name, email, avatar, created_at")
       .eq("role", "instructor")
       .order("created_at", { ascending: false });
 
@@ -162,7 +167,8 @@ app.post(
 
     if (!name || !email) {
       return res.status(400).json({
-        error: "Name and email are required",
+        error: "Validation Error",
+        message: "Name and email are required",
       });
     }
 
@@ -179,11 +185,13 @@ app.post(
 
     const userId = userData.user.id;
 
+    // Create profile
     const { error: profileError } = await supabase
       .from("profiles")
       .insert({
         id: userId,
         name,
+        email: normalizedEmail,
         role: "instructor",
       });
 
@@ -245,7 +253,10 @@ app.get(
 
     if (error) {
       if (error.code === "PGRST116") {
-        return res.status(404).json({ error: "Course not found" });
+        return res.status(404).json({
+          error: "Not Found",
+          message: "Course not found",
+        });
       }
       throw error;
     }
@@ -263,7 +274,8 @@ app.post(
 
     if (!title || !short_desc || !instructor_id) {
       return res.status(400).json({
-        error: "title, short_desc, instructor_id required",
+        error: "Validation Error",
+        message: "title, short_desc, instructor_id required",
       });
     }
 
@@ -327,7 +339,7 @@ app.delete(
 );
 
 /* ===================================================== */
-/* CURRICULUM                                            */
+/* CURRICULUM (ADMIN ONLY)                               */
 /* ===================================================== */
 
 app.get(
@@ -340,20 +352,25 @@ app.get(
     const { data, error } = await supabase
       .from("course_modules")
       .select(`
-        id, title, order_index,
+        id,
+        title,
+        order_index,
         lessons:course_lessons (
-          id, title, type, url, order_index,
+          id,
+          title,
+          type,
+          url,
+          order_index,
           files:lesson_files (
-            id, name, file_url, file_size
+            id,
+            name,
+            file_url,
+            file_size
           )
         )
       `)
       .eq("course_id", id)
-      .order("order_index", { ascending: true })
-      .order("order_index", {
-        foreignTable: "course_lessons",
-        ascending: true,
-      });
+      .order("order_index", { ascending: true });
 
     if (error) throw error;
 
@@ -367,9 +384,10 @@ app.get(
 
 app.use((err, req, res, next) => {
   console.error("🚨 SERVER ERROR:", err);
+
   res.status(500).json({
     error: "Internal Server Error",
-    message: err.message,
+    message: err.message || "Something went wrong",
   });
 });
 
