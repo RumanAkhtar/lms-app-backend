@@ -17,7 +17,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 /* ===================================================== */
-/* INITIALIZE APP                                        */
+/* INITIALIZE EXPRESS                                    */
 /* ===================================================== */
 
 const app = express();
@@ -32,7 +32,7 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 
 /* ===================================================== */
-/* SUPABASE ADMIN CLIENT                                 */
+/* SUPABASE CLIENT (SERVICE ROLE)                        */
 /* ===================================================== */
 
 const supabase = createClient(
@@ -153,7 +153,7 @@ app.get(
 
     let query = supabase
       .from("profiles")
-      .select("id, name, email, role, avatar, created_at")
+      .select("id, name, role, avatar, created_at")
       .order("name", { ascending: true });
 
     if (role) query = query.eq("role", role);
@@ -176,7 +176,7 @@ app.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from("profiles")
-      .select("id, name, email, avatar, created_at")
+      .select("id, name, role, avatar, created_at")
       .eq("role", "instructor")
       .order("created_at", { ascending: false });
 
@@ -282,58 +282,6 @@ app.get(
     }));
 
     res.status(200).json(formatted);
-  })
-);
-
-app.post(
-  "/api/announcements",
-  verifyToken,
-  requireAdmin,
-  asyncHandler(async (req, res) => {
-    const { title, content, priority } = req.body;
-
-    if (!title || !content) {
-      return res.status(400).json({
-        error: "Validation Error",
-        message: "Title and content are required",
-      });
-    }
-
-    const { data, error } = await supabase
-      .from("announcements")
-      .insert({
-        title,
-        content,
-        priority: priority || "low",
-        author_id: req.user.id,
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.status(201).json(data);
-  })
-);
-
-app.delete(
-  "/api/announcements/:id",
-  verifyToken,
-  requireAdmin,
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    const { error } = await supabase
-      .from("announcements")
-      .delete()
-      .eq("id", id);
-
-    if (error) throw error;
-
-    res.status(200).json({
-      success: true,
-      message: "Announcement deleted successfully",
-    });
   })
 );
 
