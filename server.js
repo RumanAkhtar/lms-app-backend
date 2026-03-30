@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 
 /* ===================================================== */
-/* LOAD ENVIRONMENT                                      */
+/* 1. INITIALIZATION & CONFIG                            */
 /* ===================================================== */
 
 dotenv.config();
@@ -12,55 +12,46 @@ dotenv.config();
 const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PORT } = process.env;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("❌ Missing Supabase environment variables");
+  console.error("❌ Missing Supabase environment variables.");
   process.exit(1);
 }
 
-/* ===================================================== */
-/* INITIALIZE EXPRESS                                    */
-/* ===================================================== */
-
 const app = express();
+const serverPort = PORT || 5050;
+
+// Initialize Supabase Service Role Client (Bypasses RLS)
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+});
+
+/* ===================================================== */
+/* 2. GLOBAL MIDDLEWARE                                  */
+/* ===================================================== */
 
 app.use(
   cors({
-    origin: "*", // ⚠️ Restrict in production
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: "*", // ⚠️ Restrict to specific domains in production
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
   })
 );
 
 app.use(express.json({ limit: "10mb" }));
 
-/* ===================================================== */
-/* SUPABASE SERVICE ROLE CLIENT                          */
-/* ===================================================== */
-
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
-
-/* ===================================================== */
-/* ASYNC HANDLER                                         */
-/* ===================================================== */
-
+// Helper to catch async errors without try/catch blocks in every route
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
 /* ===================================================== */
-/* AUTH MIDDLEWARE                                       */
+/* 3. AUTH & ROLE MIDDLEWARES                            */
 /* ===================================================== */
 
 const verifyToken = asyncHandler(async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (!authHeader?.startsWith("Bearer ")) {
     return res.status(401).json({
       error: "Unauthorized",
       message: "Missing or invalid Authorization header",
@@ -68,7 +59,6 @@ const verifyToken = asyncHandler(async (req, res, next) => {
   }
 
   const token = authHeader.split(" ")[1];
-
   const { data, error } = await supabase.auth.getUser(token);
 
   if (error || !data?.user) {
@@ -82,65 +72,42 @@ const verifyToken = asyncHandler(async (req, res, next) => {
   next();
 });
 
-/* ===================================================== */
-/* ROLE MIDDLEWARE                                       */
-/* ===================================================== */
+// Dynamic Role Middleware Factory (Replaces separate admin/instructor middlewares)
+const checkRole = (allowedRoles) =>
+  asyncHandler(async (req, res, next) => {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", req.user.id)
+      .single();
 
-const requireAdmin = asyncHandler(async (req, res, next) => {
-  const { data } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", req.user.id)
-    .single();
+    if (error || !data || !allowedRoles.includes(data.role)) {
+      return res.status(403).json({
+        error: "Forbidden",
+        message: `Requires one of the following roles: ${allowedRoles.join(", ")}`,
+      });
+    }
 
-  if (!data || data.role !== "admin") {
-    return res.status(403).json({
-      error: "Forbidden",
-      message: "Admin access required",
-    });
-  }
-
-  req.userRole = data.role;
-  next();
-});
-
-const requireAdminOrInstructor = asyncHandler(async (req, res, next) => {
-  const { data } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", req.user.id)
-    .single();
-
-  if (!data || !["admin", "instructor"].includes(data.role)) {
-    return res.status(403).json({
-      error: "Forbidden",
-      message: "Admin or Instructor access required",
-    });
-  }
-
-  req.userRole = data.role;
-  next();
-});
-
-/* ===================================================== */
-/* HEALTH CHECK                                          */
-/* ===================================================== */
-
-app.get("/api/health", (req, res) => {
-  res.status(200).json({
-    status: "OK",
-    message: "🚀 LMS Backend API running",
+    req.userRole = data.role;
+    next();
   });
+
+/* ===================================================== */
+/* 4. API ROUTES                                         */
+/* ===================================================== */
+
+const apiRouter = express.Router();
+
+// Health Check
+apiRouter.get("/health", (req, res) => {
+  res.status(200).json({ status: "OK", message: "🚀 LMS Backend API running" });
 });
 
-/* ===================================================== */
-/* USERS (ADMIN ONLY)                                    */
-/* ===================================================== */
-
-app.get(
-  "/api/users",
+// Users (Admin Only)
+apiRouter.get(
+  "/users",
   verifyToken,
-  requireAdmin,
+  checkRole(["admin"]),
   asyncHandler(async (req, res) => {
     const { role } = req.query;
 
@@ -158,14 +125,11 @@ app.get(
   })
 );
 
-/* ===================================================== */
-/* INSTRUCTORS (ADMIN ONLY)                              */
-/* ===================================================== */
-
-app.get(
-  "/api/instructors",
+// Instructors (Admin Only)
+apiRouter.get(
+  "/instructors",
   verifyToken,
-  requireAdmin,
+  checkRole(["admin"]),
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from("profiles")
@@ -179,26 +143,16 @@ app.get(
   })
 );
 
-/* ===================================================== */
-/* COURSES (ADMIN ONLY)                                  */
-/* ===================================================== */
-
-app.get(
-  "/api/courses",
+// Courses (Admin Only)
+apiRouter.get(
+  "/courses",
   verifyToken,
-  requireAdmin,
+  checkRole(["admin"]),
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from("courses")
       .select(`
-        id,
-        title,
-        short_desc,
-        thumbnail_url,
-        category,
-        level,
-        status,
-        created_at,
+        id, title, short_desc, thumbnail_url, category, level, status, created_at,
         profiles:instructor_id ( id, name )
       `)
       .order("created_at", { ascending: false });
@@ -209,59 +163,41 @@ app.get(
   })
 );
 
-/* ===================================================== */
-/* COURSE DETAILS (ADMIN ONLY)                           */
-/* ===================================================== */
-
-app.get(
-  "/api/courses/:id",
+// Course Details (Admin Only)
+apiRouter.get(
+  "/courses/:id",
   verifyToken,
-  requireAdmin,
+  checkRole(["admin"]),
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
     const { data, error } = await supabase
       .from("courses")
-      .select(`
-        *,
-        profiles:instructor_id ( id, name )
-      `)
-      .eq("id", id)
+      .select(`*, profiles:instructor_id ( id, name )`)
+      .eq("id", req.params.id)
       .single();
 
     if (error || !data) {
-      return res.status(404).json({
-        error: "Not Found",
-        message: "Course not found",
-      });
+      return res.status(404).json({ error: "Not Found", message: "Course not found" });
     }
 
     res.json(data);
   })
 );
 
-/* ===================================================== */
-/* LIVE SESSIONS (ADMIN + INSTRUCTOR)                    */
-/* ===================================================== */
-
-app.get(
-  "/api/live-sessions",
+// Live Sessions (Admin + Instructor)
+apiRouter.get(
+  "/live-sessions",
   verifyToken,
-  requireAdminOrInstructor,
+  checkRole(["admin", "instructor"]),
   asyncHandler(async (req, res) => {
     let query = supabase
       .from("live_sessions")
       .select(`
-        id,
-        title,
-        course,
-        start_time,
-        status,
-        instructor_id,
+        id, title, course, start_time, status, instructor_id,
         profiles:instructor_id ( id, name )
       `)
       .order("start_time", { ascending: false });
 
+    // If instructor, only show their own sessions
     if (req.userRole === "instructor") {
       query = query.eq("instructor_id", req.user.id);
     }
@@ -273,71 +209,55 @@ app.get(
   })
 );
 
-/* ===================================================== */
-/* ANNOUNCEMENTS (ADMIN ONLY)                            */
-/* ===================================================== */
-
-app.get(
-  "/api/announcements",
+// Announcements (Admin Only)
+apiRouter.get(
+  "/announcements",
   verifyToken,
-  requireAdmin,
+  checkRole(["admin"]),
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from("announcements")
-      .select(`
-        id,
-        title,
-        content,
-        priority,
-        created_at,
-        profiles:author_id ( name )
-      `)
+      .select(`id, title, content, priority, created_at, profiles:author_id ( name )`)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
 
     const formatted = data.map((a) => ({
-      id: a.id,
-      title: a.title,
-      content: a.content,
-      priority: a.priority,
-      created_at: a.created_at,
+      ...a,
       author: a.profiles?.name || "Admin",
+      profiles: undefined, // Strip the nested object for a cleaner response
     }));
 
     res.json(formatted);
   })
 );
 
+// Mount API router
+app.use("/api", apiRouter);
+
 /* ===================================================== */
-/* 404 HANDLER                                           */
+/* 5. ERROR HANDLING                                     */
 /* ===================================================== */
 
+// 404 Handler
 app.use((req, res) => {
-  res.status(404).json({
-    error: "Not Found",
-    message: "API route not found",
-  });
+  res.status(404).json({ error: "Not Found", message: "API route not found" });
 });
 
-/* ===================================================== */
-/* GLOBAL ERROR HANDLER                                  */
-/* ===================================================== */
-
+// Global Error Handler
 app.use((err, req, res, next) => {
   console.error("🚨 SERVER ERROR:", err);
-
-  res.status(500).json({
+  
+  const statusCode = err.status || 500;
+  res.status(statusCode).json({
     error: "Internal Server Error",
     message: err.message || "Something went wrong",
   });
 });
 
 /* ===================================================== */
-/* START SERVER                                          */
+/* 6. START SERVER                                       */
 /* ===================================================== */
-
-const serverPort = PORT || 5050;
 
 app.listen(serverPort, "0.0.0.0", () => {
   console.log(`🚀 LMS Backend running on port ${serverPort}`);
